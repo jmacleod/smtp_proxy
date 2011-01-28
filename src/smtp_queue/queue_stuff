@@ -1,0 +1,9 @@
+need a sturct for each method that will contain fields with
+
+from
+to
+received time
+last attempt time
+last attempt status
+pointer to blocks of data/memory holding message 
+

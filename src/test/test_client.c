@@ -90,6 +90,12 @@ int queryServer(char* hostname, char *searchterm) {
     buf[numbytes] = '\0';
  
     printf("client: received '%s'\n",buf);
+
+    if (send(sockfd, "EHLO, IROCK\n", 13, 0) == -1){
+
+        perror("send");
+    }
+
  
     close(sockfd);    
   
