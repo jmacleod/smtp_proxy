@@ -1,0 +1,123 @@
+Roadmap:
+  get multithreaded smtp listener working
+  smtpd protocol state machine
+  queueing
+  auth, via file, ldap, sql, maybe pam
+  tls/ssl
+  proxy/full server
+  writing to disk
+  delivery, maybe sub in postfix as stub until this is done
+  
+
+So were using a multithreaded smtp server
+
+
+smtpd states
+Always pass any fds or structs (message, connection)
+maybe we should set a timer for each state, and just hangup if it is reached without checking why, that way we don't have to check for each read/write
+
+1. ready_for_connections
+   - close any fds 
+   - release any memory (probably mostly when initializing message struct)
+   - connection context/struct initialized
+   - message context/struct initialized
+   - waiting on signal
+   Only possible event is being signaled
+    Then it should:
+       - get the fd
+       - update connection context/structs
+       - go to the connected state 
+       - or possibly if hung up on from the other end, loop back to self
+
+2. connected
+  - Send Banner
+  - 
+
+  - Possible events
+      - connection hangup
+          - goto ready_for_connections 
+      - timeout on recv, hangup and go to ready_for_connections
+      - Any command but EHLO <string>
+          - tell them to fuck off and come back to connected_state
+      - EHLO <string>
+          - update connection context with info and goto ehlo state
+      - STARTTLS
+          - goto tls
+
+3. ehlo  (should auth and tls be their own state? yes)
+  - Show info and capabilities
+
+  - Possible events
+     - connection hangup
+          - goto ready_for_connections 
+     - timeout on recv, hangup and go to ready_for_connections
+     - AUTH if available
+          - goto auth
+     - STARTTLS if AVAILABE
+     - MAIL FROM
+          - mail_from
+3.a auth
+     - maybe check for tls we may want to require it to auth as a config parameter
+ 
+  - Possible events
+     - connection hangup
+          - goto ready_for_connections 
+     - timeout on recv, hangup and go to ready_for_connections
+    
+     - auth fail
+          - update connection struct and message struct  with auth stuff
+          - print out fail message, goto ehlo, 
+          - maybe too many failures, goto  ready_for_connections
+     - auth suceed
+          - update connection struct and message struct  with auth stuff
+          - goto ehlo
+          
+3.b tls
+     - connection hangup
+          - goto ready_for_connections 
+     - timeout on recv, hangup and go to ready_for_connections
+     - tls fail
+          - dump them and goto ready_for_connections
+     - tls suceed
+          - do tls, update connection context    
+          - goto ehlo
+4. mail_from
+     - connection hangup
+          - goto ready_for_connections 
+     - timeout on recv, hangup and go to ready_for_connections
+spf?
+
+5. rcpt to
+RCPT TO: jmacleod@synacor.com
+554 5.1.2 Domain Relaying denied
+RCPT TO: synoc01@embarqmail.com
+250 2.1.5 Accepted for you
+RCPT TO: synoc01@embarqmail.com
+250 2.1.5 Accepted for you
+RCPT TO: synoc02@embarqmail.com 
+250 2.1.5 Accepted for you
+
+6. data
+
+7. post data, goo hook to check message for spam virus
+
+8. queue
+
+
+
+data structures
+  connection
+    - sender ip
+    - local ip (multi ip host maybe)
+    - sender port
+    - local port
+    - dns looku pinfo
+    - time of connection
+    - ssl/tls related stuff?
+  message
+     - from,to,time,pointer to data
+     - queue information
+         - last mx lookup result
+         - last send attempt time
+         - last send attempt result
+         - etc

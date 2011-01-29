@@ -16,33 +16,11 @@
 #define MAXDATASIZE 100 // max number of bytes we can get at once 
 #define BACKLOG 10     // how many pending connections queue will hold
 #define NUM_SMTP_LISTENER_THREADS 10 
-pthread_mutex_t thread_ready_mutex     = PTHREAD_MUTEX_INITIALIZER; //do we maybe need an arry of these for each thread? and a seperate mutex in the fuctions for updating?
-pthread_cond_t  thread_ready_var[NUM_SMTP_LISTENER_THREADS];
+pthread_mutex_t new_fd_mutex           = PTHREAD_MUTEX_INITIALIZER;//used so that when a thread copies new_fd, another thread doesnt take the same
+pthread_mutex_t thread_ready_mutex     = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t  thread_ready_var       = PTHREAD_COND_INITIALIZER;
 
-void initialize_thread_ready_var (){
-    int i;
-    for (i=0;i<NUM_SMTP_LISTENER_THREADS;i++){
-        pthread_cond_init(&thread_ready_var[i],NULL);
-        //thread_ready_var[i]   = PTHREAD_COND_INITIALIZER;
-    }
-}
-int fds[NUM_SMTP_LISTENER_THREADS];
-
-//preallocate because we know how many we only need as many as there are threads, that way we don't need to malloc for linked list
-struct  ready_thread_struct {
-   int thread_num;
-   struct ready_thread_struct * next;
-} ready_thread_struct_array[NUM_SMTP_LISTENER_THREADS];
-struct ready_thread_struct *ready_threads = NULL, *last_ready_thread = NULL;
-
-void initialize_ready_thread_struct(){
-    int i;
-    for (i=0;i<NUM_SMTP_LISTENER_THREADS;i++){
-        ready_thread_struct_array[i].thread_num=i;
-        ready_thread_struct_array[i].next=NULL;
-    }
-}
-    
+int new_fd = 0;;
  
 void sigchld_handler(int s)
 {
@@ -59,43 +37,8 @@ void *get_in_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
  
-int mark_self_as_ready(int thread_num){  //maybe this can be the initial state or action in state machine 
-
-    // Lock mutex and then wait for signal to relase mutex
-    pthread_mutex_lock( &thread_ready_mutex );
-    //update self as ready clear 
-    ready_thread_struct_array[thread_num].next = NULL;
-    if (ready_threads->next == NULL){
-        //if the list is empty make this the first node.
-        ready_threads->next = &ready_thread_struct_array[thread_num];
-    }else {
-        //elese insert this at the end
-        last_ready_thread->next = &ready_thread_struct_array[thread_num];
-    }
-    last_ready_thread = &ready_thread_struct_array[thread_num];
-    // mutex unlocked if condition var is set 
-    pthread_cond_wait( &thread_ready_var[thread_num], &thread_ready_mutex );
-}
-
-int get_next_ready_thread() {
-    int thread_num;
-    
-    pthread_mutex_lock( &thread_ready_mutex );
-
-    if (ready_threads == NULL){
-        //maybe wait for some time before and try again before returning failure, would need to release mutex so threads could be add to list
-        return -1;
-    }
-    thread_num = ready_threads->thread_num;
-    ready_threads = ready_threads->next;
-
-    pthread_mutex_unlock( &thread_ready_mutex );
-    return(thread_num);
-} 
-
 void *listener (){
-    int sockfd, new_fd;  // listen on sock_fd, and on accept get a new_fd
-    int ready_thread_num;
+    int sockfd;  // listen on sock_fd
     struct addrinfo hints, *servinfo, *p;
     struct sockaddr_storage their_addr; // connector's address information
     socklen_t sin_size;
@@ -172,30 +115,40 @@ void *listener (){
         printf("server: got connection from %s\n", s);
 
         pthread_mutex_lock( &thread_ready_mutex );
-        if (ready_thread_num = get_next_ready_thread()==-1){ // get a ready thread
-            perror("need more threads");
-        }
-        fds[ready_thread_num] = new_fd; // update ready thread's fd with new one from accept
-        // signal that thread
-        pthread_cond_signal( &thread_ready_var[ready_thread_num] );
+        // signal a random(?) worker thread
+        pthread_cond_signal( &thread_ready_var);
         pthread_mutex_unlock( &thread_ready_mutex );
     }
 } 
 
 void *worker(int *thread_num_in){
     int thread_num = *thread_num_in;
+    int fd=-1;
     int numbytes = 0;
     char buf[MAXDATASIZE];
     printf("entering worker thread_num(%d)\n",thread_num);
     while (1){
-        mark_self_as_ready(thread_num);
+    //eventually this will be a state in state machine we start in and return to
+    pthread_mutex_lock( &thread_ready_mutex );
+    pthread_cond_wait( &thread_ready_var, &thread_ready_mutex );
+
+    pthread_mutex_lock( &new_fd_mutex );
+    fd = new_fd;
+    if (fd == -1){
+        printf("WTF, why was new_fd = -1 when worker tried to pick it up\n");
+        exit(0);
+    }
+    new_fd=-1;
+    pthread_mutex_unlock( &new_fd_mutex );
+
+    printf("I am alive   thread(%d)  my fd = (%d)\n",thread_num, fd);
 
         sprintf(buf,"220 mx.changeme.com ESMTP(thread id: %d\n",thread_num);
-        if (send(fds[thread_num], buf, sizeof(buf), 0) == -1){
+        if (send(fd, buf, sizeof(buf), 0) == -1){
             perror("send");
         }
 
-        if ((numbytes = recv(fds[thread_num], buf, MAXDATASIZE-1, 0)) == -1) {
+        if ((numbytes = recv(fd, buf, MAXDATASIZE-1, 0)) == -1) {
             perror("recv");
             exit(1);
         }
@@ -204,7 +157,7 @@ void *worker(int *thread_num_in){
 
         printf("got:  '%s'\n",buf);
 
-        close(fds[thread_num]);
+        close(fd);
         pthread_mutex_unlock( &thread_ready_mutex );
   }
 
@@ -215,22 +168,14 @@ int main(void)
     pthread_t listener_thread;
     pthread_t worker_threads[NUM_SMTP_LISTENER_THREADS];
     int i;
-
-printf("1\n");
-    initialize_thread_ready_var();
-printf("2\n");
-    initialize_ready_thread_struct();
 	 
-printf("3\n");
     for (i=0;i<NUM_SMTP_LISTENER_THREADS;i++){
         printf("3 %d\n",i);
         pthread_create( &worker_threads[i], NULL, &worker, &i);
     }
 
-printf("4\n");
     pthread_create( &listener_thread, NULL, &listener, NULL);
 
-printf("5\n");
     
     pthread_join( listener_thread, NULL);
 
